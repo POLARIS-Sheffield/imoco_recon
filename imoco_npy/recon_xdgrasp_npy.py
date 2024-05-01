@@ -85,6 +85,11 @@ coord = np.reshape(traj,(nphase*npe,nfe,3))
 mps = ext.jsens_calib(ksp,coord,dcf2,device = sp.Device(device),ishape = tshape)
 S = sp.linop.Multiply(tshape, mps)
 
+# delete arrays to save memory
+coord = None
+dcf2 = None
+ksp = None
+
 ### recon
 print('starting prep')
 PFTSs = []
@@ -100,6 +105,11 @@ wdata = data*dcf[:,np.newaxis,:,:]
 tmp = PFTSs.H*PFTSs*np.complex64(np.ones((nphase,)+tshape))
 L=np.mean(np.abs(tmp))
 
+# delete arrays to save memory
+dcf = None
+traj = None
+data = None
+tmp = None
 
 ## reconstruction
 print('starting recon')

@@ -90,6 +90,7 @@ if __name__ == '__main__':
     S = sp.linop.Multiply(tshape, mps)
 
     # Delete some unused arrays to save memory
+    print('Freeing up some memory...')
     dcf2 = None
     ksp = None
     coord = None
@@ -164,9 +165,11 @@ if __name__ == '__main__':
     # proxg = sp.prox.UnitaryTransform(sp.prox.L1Reg(TV.oshape, lambda_TV), TV)
     
     # Delete some unused arrays to save memory
+    print('Freeing up some memory...')
     dcf = None
     traj = None
     data = None
+    tmp = None
 
     # ADMM
     print('Recon...')
