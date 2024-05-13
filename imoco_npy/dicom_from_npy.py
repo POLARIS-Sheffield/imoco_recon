@@ -14,6 +14,7 @@ import glob
 import sys
 import argparse
 import logging
+import re
 
 if __name__=='__main__':
     # parse arguments
@@ -22,27 +23,22 @@ if __name__=='__main__':
     
     parser.add_argument('input_file', type=str, help='path to numpy file')
     parser.add_argument('orig_dicom_dir', type=str, help='path to DICOM directory')
-    parser.add_argument('--flip_lr_flag', type=int, default=1, help='flag to flip the images')
-    parser.add_argument('--flip_ud_flag', type=int, default=1, help='flag to flip the images')
     args = parser.parse_args()
 
-    flip_lr_flag = args.flip_lr_flag
-    flip_ud_flag = args.flip_ud_flag
     input_file = args.input_file
     orig_dicom_dir = args.orig_dicom_dir
     logging.basicConfig(level=logging.INFO)
 
     # set directories
     im = np.load(input_file)
-    
-    im = np.transpose(im, axes=[0, 2, 1])
-    
     new_dicom_dir = input_file[:-4] + '_dcm'
 
     # load original dicom
     # exam number, series number
     dcm_ls = glob.glob(orig_dicom_dir + '/*.dcm')
-    series_mimic_dir = dcm_ls[0]
+    # Sort by slice number
+    dcm_ls = sorted(dcm_ls,key=lambda s: int(re.findall(r'\d+',s)[-1]))
+    series_mimic_dir = dcm_ls[-1]
     ds = pyd.dcmread(series_mimic_dir)
     # parse exam number, series number
     dcm_file = os.path.basename(series_mimic_dir)
@@ -53,28 +49,27 @@ if __name__=='__main__':
     im_shape = np.shape(im)
     ds.Columns, ds.Rows = im_shape[-2], im_shape[-1]
 
-    spatial_resolution = ds.SliceThickness
+    # Edit spatial resolution according to recon to 255 instead of 256
+    spatial_resolution = ds.PixelSpacing[0] * (len(dcm_ls)/ds.Columns)
 
     # Update SliceLocation information
     series_mimic_slices = np.double(ds.Columns)  # assume recon is isotropic
-    SliceLocation_center = ds.SliceLocation - \
-        (series_mimic_slices - 1) / 2 * ds.SpacingBetweenSlices
-    ImagePosition_zcenter = ds.ImagePositionPatient[2] + (
-        series_mimic_slices - 1) / 2 * ds.SpacingBetweenSlices
-
-    ds.SpacingBetweenSlices = spatial_resolution
-    ds.PixelSpacing = [spatial_resolution, spatial_resolution]
-    ds.SliceThickness = spatial_resolution
+#    ds.SpacingBetweenSlices = spatial_resolution
+#    ds.SliceThickness = spatial_resolution
     ds.ReconstructionDiameter = spatial_resolution * im_shape[-1]
+    # Update pixel spacing according to 255 vs 256 pixels
+    ds.PixelSpacing = spatial_resolution
 
     SliceLocation_original = ds.SliceLocation
-    ImagePositionPatient_original = ds.ImagePositionPatient
+    ImagePositionPatient_original = ds.ImagePositionPatient 
+    # Shift slice location by one pixel to make IPP match
+    ImagePositionPatient_original[-1] = ImagePositionPatient_original[-1] - spatial_resolution
+    
+    logging.info(f'IPP original: {ImagePositionPatient_original}')
 
+    im = np.transpose(im, axes=[0, 2, 1])
     # Comment this line to flip images up-down
-    if flip_ud_flag:
-        im = np.flip(im,0)
-    if flip_lr_flag:
-        im = np.flip(im,2)
+    im = np.flip(im,0)
 
     try:
         os.mkdir(new_dicom_dir)
@@ -83,12 +78,12 @@ if __name__=='__main__':
 
     ds.SeriesDescription = '3D UTE - imoco' 
     # adding 10, this should ensure no overlap with other series numbers for Philips numbering which uses series number (in order acquired) *100
-    series_write = int(series_mimic) + (10*(ph+1))
+    series_write = int(series_mimic) + 10
 
     # modified time
     dt = datetime.datetime.now()
 
-    im = np.abs(im) / np.amax(np.abs(im)) * 4095  # 65535
+    im = np.abs(im) / np.amax(np.abs(im)) * 4095 # 65535 
     im = im.astype(np.uint16)
 
     # Window and level for the image
@@ -110,7 +105,7 @@ if __name__=='__main__':
         ds.SliceLocation = SliceLocation_original + \
             (im_shape[-1] / 2 - (z + 1)) * spatial_resolution
         ds.ImagePositionPatient = pyd.multival.MultiValue(float, [float(ImagePositionPatient_original[0]), float(
-            ImagePositionPatient_original[1]), ImagePositionPatient_original[2] - (im_shape[-1] / 2 - (z + 1)) * spatial_resolution])
+            ImagePositionPatient_original[1]), ImagePositionPatient_original[2] + (z + 1) * spatial_resolution])
         b = im[z, :, :].astype('<u2')
         ds.PixelData = b.T.tobytes()
         #ds.is_little_endian = False
