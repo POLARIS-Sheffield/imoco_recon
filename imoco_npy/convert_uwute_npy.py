@@ -11,6 +11,7 @@ import logging
 from scipy.signal import firls, convolve, find_peaks
 from scipy.ndimage import maximum_filter, minimum_filter
 from scipy.interpolate import interp1d
+import matplotlib.pyplot as plt
 
 def convert_uwute(hf):
     try:
@@ -224,17 +225,21 @@ def pr_binning(ksp, coord, dcf, resp, TR, nbin):
     bcoord = []
     bdcf = []
     
+    binSelect = np.zeros((len(resp),nbin))
+    binSelect[:] = np.nan
+
     for b in range(nbin):
         idx = index[npe * int(b) : npe * int(b + 1)]
         bksp.append(ksp[:, idx,:])
         bcoord.append(coord[idx,:,:])
         bdcf.append(dcf[idx,:])
-
+        binSelect[idx,b] = resp[idx]
+    
     bksp = np.stack(bksp, axis=0)
     bcoord = np.stack(bcoord, axis=0)
     bdcf = np.stack(bdcf, axis=0)
     
-    return bksp, bcoord, bdcf
+    return bksp, bcoord, bdcf, binSelect
     
 if __name__=='__main__':
     # parse arguments
@@ -269,11 +274,25 @@ if __name__=='__main__':
     logging.info('Extracting respiratory signal.')
     dc = ksp[:, :, 0]
     resp = resp_polar * estimate_resp(dc, tr)
-    #np.save(os.path.join(folder, 'resp.npy'), resp)
+    np.save(os.path.join(folder, 'resp.npy'), resp)
     
     # binning
     logging.info('Motion resolved binning.')
-    bksp, bcoord, bdcf = pr_binning(ksp, coord, dcf, resp, tr, bins)
+    bksp, bcoord, bdcf, binAssigned = pr_binning(ksp, coord, dcf, resp, tr, bins)
+    
+    np.save(os.path.join(folder, 'binAssigned.npy'), binAssigned)
+    nSpokes, nbins = binAssigned.shape
+
+    fig2, ax2 = plt.subplots()
+    if nbins == 1:
+        ax2.plot(np.arange(1,nSpokes+1),resp,linewidth=0.25,label='resp')
+    for bin in range(nbins):
+        ax2.plot(np.arange(1,nSpokes+1),binAssigned[:,bin], linewidth=0.25, label=str(bin+1))
+    ax2.set_xlabel('# points')
+    ax2.set_ylabel('Resp Signal')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(('binAssigned'),dpi=600)
 
     logging.info('Saving data.')
     os.makedirs(folder, exist_ok=True)

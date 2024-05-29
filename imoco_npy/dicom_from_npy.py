@@ -46,8 +46,19 @@ if __name__=='__main__':
         'Series', '_').replace('Image', '_').replace('.dcm', '').split('_')
     exam_number = int(exam_number)
 
-    im_shape = np.shape(im)
-    ds.Columns, ds.Rows = im_shape[-2], im_shape[-1]
+    # Check size and zero-pad as needed (cannot rotate otherwise)
+    if im.shape[0] != im.shape[1]: 
+        logging.warn('Data is not square - padding')
+        imSize = np.max(im.shape)
+        imOut = np.zeros((imSize,imSize,imSize),dtype=np.dtype('complex64'))
+        pad_x = int(np.floor((imSize - im.shape[0])/2))
+        pad_y = int(np.floor((imSize - im.shape[1])/2))
+        imOut[pad_x:(pad_x+im.shape[0]),pad_y:(pad_y+im.shape[1]),:im.shape[2]] = im
+    else:
+        imOut = np.copy(im)
+
+    im_shape = imOut.shape
+    ds.Columns, ds.Rows = im_shape[-2], im_shape[0]
 
     # Edit spatial resolution according to recon to 255 instead of 256
     spatial_resolution = ds.PixelSpacing[0] * (len(dcm_ls)/ds.Columns)
@@ -56,7 +67,7 @@ if __name__=='__main__':
     series_mimic_slices = np.double(ds.Columns)  # assume recon is isotropic
 #    ds.SpacingBetweenSlices = spatial_resolution
 #    ds.SliceThickness = spatial_resolution
-    ds.ReconstructionDiameter = spatial_resolution * im_shape[-1]
+    ds.ReconstructionDiameter = spatial_resolution * imOut.shape[-1]
     # Update pixel spacing according to 255 vs 256 pixels
     ds.PixelSpacing = spatial_resolution
 
@@ -67,9 +78,13 @@ if __name__=='__main__':
     
     logging.info(f'IPP original: {ImagePositionPatient_original}')
 
-    im = np.transpose(im, axes=[0, 2, 1])
-    # Comment this line to flip images up-down
-    im = np.flip(im,0)
+    # default orientation is Rotate270CounterClockwise, TransposeOff
+    imOut = np.rot90(imOut,k=-3,axes=(1,2))
+    # default flip 
+    imOut = np.flip(imOut,0)
+    imOut = np.flip(imOut,1)
+
+    # imOut = np.transpose(imOut, axes=[0, 2, 1])
 
     try:
         os.mkdir(new_dicom_dir)
@@ -83,12 +98,12 @@ if __name__=='__main__':
     # modified time
     dt = datetime.datetime.now()
 
-    im = np.abs(im) / np.amax(np.abs(im)) * 4095 # 65535 
-    im = im.astype(np.uint16)
+    imOut = np.abs(imOut) / np.amax(np.abs(imOut)) * 4095 # 65535 
+    imOut = imOut.astype(np.uint16)
 
     # Window and level for the image
-    ds.WindowCenter = int(np.amax(im) / 2)
-    ds.WindowWidth = int(np.amax(im))
+    ds.WindowCenter = int(np.amax(imOut) / 2)
+    ds.WindowWidth = int(np.amax(imOut))
 
     # dicom series UID
     ds.SeriesInstanceUID = pyd.uid.generate_uid()
@@ -103,10 +118,10 @@ if __name__=='__main__':
         Filename = '{:s}/E{:d}S{:d}I{:d}.DCM'.format(
             new_dicom_dir, exam_number, series_write, z + 1)
         ds.SliceLocation = SliceLocation_original + \
-            (im_shape[-1] / 2 - (z + 1)) * spatial_resolution
+            (im.shape[-1] / 2 - (z + 1)) * spatial_resolution
         ds.ImagePositionPatient = pyd.multival.MultiValue(float, [float(ImagePositionPatient_original[0]), float(
             ImagePositionPatient_original[1]), ImagePositionPatient_original[2] + (z + 1) * spatial_resolution])
-        b = im[z, :, :].astype('<u2')
+        b = imOut[z, :, :].astype('<u2')
         ds.PixelData = b.T.tobytes()
         #ds.is_little_endian = False
         ds.save_as(Filename)
