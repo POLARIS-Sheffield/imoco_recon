@@ -47,13 +47,14 @@ if __name__=='__main__':
     exam_number = int(exam_number)
 
     # Check size and zero-pad as needed (cannot rotate otherwise)
-    if im.shape[0] != im.shape[1]: 
+    if (im.shape[0] != im.shape[1] and im.shape[1] != im.shape[2] and im.shape[0] != im.shape[2]): 
         logging.warn('Data is not square - padding')
         imSize = np.max(im.shape)
         imOut = np.zeros((imSize,imSize,imSize),dtype=np.dtype('complex64'))
         pad_x = int(np.floor((imSize - im.shape[0])/2))
         pad_y = int(np.floor((imSize - im.shape[1])/2))
-        imOut[pad_x:(pad_x+im.shape[0]),pad_y:(pad_y+im.shape[1]),:im.shape[2]] = im
+        pad_z = int(np.floor((imSize - im.shape[2])/2))
+        imOut[pad_x:(pad_x+im.shape[0]),pad_y:(pad_y+im.shape[1]),pad_z:(pad_z+im.shape[2])] = im
     else:
         imOut = np.copy(im)
 
@@ -118,7 +119,7 @@ if __name__=='__main__':
         Filename = '{:s}/E{:d}S{:d}I{:d}.DCM'.format(
             new_dicom_dir, exam_number, series_write, z + 1)
         ds.SliceLocation = SliceLocation_original + \
-            (im.shape[-1] / 2 - (z + 1)) * spatial_resolution
+            (im_shape[-1] / 2 - (z + 1)) * spatial_resolution
         ds.ImagePositionPatient = pyd.multival.MultiValue(float, [float(ImagePositionPatient_original[0]), float(
             ImagePositionPatient_original[1]), ImagePositionPatient_original[2] + (z + 1) * spatial_resolution])
         b = imOut[z, :, :].astype('<u2')
