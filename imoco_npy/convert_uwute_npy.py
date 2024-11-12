@@ -1,17 +1,26 @@
 #!/usr/bin/env python3
-'''
+# -*- coding: utf-8 -*-
+"""
+Created on Sat May 14 21:14:12 2022
+
+@author: ftan1
+
 modified from https://github.com/mikgroup/extreme_mri_data/blob/master/convert_uwute.py
-'''
+"""
+
 import argparse
 import os
+import sys
+import time
 import numpy as np
+import matplotlib.pyplot as plt
 import h5py
 import sigpy.mri as mr
 import logging
-from scipy.signal import firls, convolve, find_peaks
+from scipy.signal import firls, convolve, find_peaks, peak_prominences
 from scipy.ndimage import maximum_filter, minimum_filter
 from scipy.interpolate import interp1d
-import matplotlib.pyplot as plt
+from sklearn.decomposition import FastICA
 
 def convert_uwute(hf):
     try:
@@ -70,9 +79,13 @@ def convert_uwute(hf):
         logging.info('No noise data.')
         pass
     
-    return ksp, coord, dcf
+    # load resp bellow data
+    resp = np.squeeze(hf['Gating']['RESP_E0'])
+    resp = resp[order]
+    
+    return ksp, coord, dcf, resp
 
-def estimate_resp(dc, tr, n=9999, fl=0.1, fh=0.5, fw=0.01):
+def estimate_resp(dc, tr, n=9999, fl=0.1, fh=0.5, fw=0.01, n_ica=8):
     """Estimate respiratory signal from DC.
     The function performs:
     1) Filter DC with a band-pass filter with symmetric extension.
@@ -89,14 +102,21 @@ def estimate_resp(dc, tr, n=9999, fl=0.1, fh=0.5, fw=0.01):
         array: respiratory signal of length num_tr.
     """
     dc = np.abs(dc)
+    
+    # add ICA
+    transformer = FastICA(n_components=n_ica, random_state=0, whiten='unit-variance')
+    dc_t = transformer.fit_transform(dc.T)
+    dc_t = dc_t.T
+    
+    #
     fs = 1 / tr
     bands = [0, fl - fw, fl, fh, fh + fw, fs / 2]
     desired = [0, 0, 1, 1, 0, 0]
 
     filt = firls(n, bands, desired, fs=fs)
     sigma_max = 0
-    for c in range(len(dc)):
-        dc_pad = np.pad(dc[c], [n // 2, n // 2], mode='reflect')
+    for c in range(len(dc_t)):
+        dc_pad = np.pad(dc_t[c], [n // 2, n // 2], mode='reflect')
         resp_c = convolve(dc_pad, filt, mode='valid')
         sigma_c = 1.4826 * np.median(np.abs(resp_c - np.median(resp_c)))
 
@@ -188,53 +208,64 @@ def pr_binning(ksp, coord, dcf, resp, TR, nbin):
     signal_s = np.mean(resp_max - resp_min)
     
     index = np.arange(len(resp))
-    upper_bound = signal_m + 1.2 * signal_s
-    lower_bound = signal_m - .8 * signal_s
-    eff_index = index[(resp < upper_bound) & (resp > lower_bound)]
+    # upper_bound = signal_m + 1.2 * signal_s
+    # lower_bound = signal_m - .8 * signal_s
+    # eff_index = index[(resp < upper_bound) & (resp > lower_bound)]
     
     exhale_th = signal_m + 0.2 * signal_s
-    exhale_pos, ex_dict = find_peaks(resp[eff_index], distance = N_resp, height = exhale_th)
+    exhale_pos, ex_dict = find_peaks(resp, distance = N_resp, height = exhale_th)
     ex_signal = ex_dict['peak_heights']
-    drift = interp1d(eff_index[exhale_pos], ex_signal, kind='cubic', fill_value = "extrapolate")(index)
+    #drift = interp1d(eff_index[exhale_pos], ex_signal, kind='cubic', fill_value = "extrapolate")(index)
     
-    resp = resp - drift
-    exhale_pos, ex_dict = find_peaks(resp[eff_index], distance = N_resp, height = -1000)
-    ex_signal = ex_dict['peak_heights']
+    #resp = resp - drift
+    #exhale_pos, ex_dict = find_peaks(resp[eff_index], distance = N_resp, height = -1000)
+    #ex_signal = ex_dict['peak_heights']
     
-  
+    # truncate by prominance
+    prom = peak_prominences(resp, exhale_pos) # prom[0]: value, prom[1]: start loc, prom[2]: end loc
+    prom_ind = (prom[0]>(np.mean(prom[0])-1*np.std(prom[0]))) & (prom[0]<(np.mean(prom[0])+1*np.std(prom[0]))) # 1.645 ~ 90% truncation
+    prom_start = prom[1][prom_ind]
+    prom_end = prom[2][prom_ind]
+    logic_index_p = np.full((len(resp),), False)
+    for p in range(len(prom_start)):
+        logic_index_p[prom_start[p]:prom_end[p]] = True
     
+    # discard points before 1st exhale and last exhale 
+    logic_index_t = (index >= exhale_pos[0]) & (index <= exhale_pos[-1])
+    
+    # combine prominence & 1st last exhale truncation
+    eff_index = index[np.logical_and(logic_index_p, logic_index_t)]
+      
     # assign phase
-    phase = np.zeros(np.size(eff_index))
+    phase = np.zeros(np.size(resp))
     for p in range(len(exhale_pos)-1):
         phase[exhale_pos[p]:exhale_pos[p+1]] = np.linspace(0.5, nbin + 0.5, exhale_pos[p+1] - exhale_pos[p], endpoint=False) % nbin
     
-    # discard points before 1st exhale and last exhale 
-    phase = phase[(eff_index >= exhale_pos[0]) & (eff_index <= exhale_pos[-1])]
-    eff_index = eff_index[(eff_index >= exhale_pos[0]) & (eff_index <= exhale_pos[-1])]  
-    
+    # crop phase
+    phase = phase[eff_index]
     
     # introduce slight disturb
     ex_std = np.std(ex_signal)    
     phase = phase + np.random.rand(len(eff_index)) * .01 * ex_std
     
     # sort index according to phase
-    index = eff_index[np.argsort(phase)]
+    ind = eff_index[np.argsort(phase)]
     
-    npe = len(index) // nbin
+    npe = len(ind) // nbin
     bksp = []
     bcoord = []
     bdcf = []
-    
+
     binSelect = np.zeros((len(resp),nbin))
     binSelect[:] = np.nan
-
+    
     for b in range(nbin):
-        idx = index[npe * int(b) : npe * int(b + 1)]
+        idx = ind[npe * int(b) : npe * int(b + 1)]
         bksp.append(ksp[:, idx,:])
         bcoord.append(coord[idx,:,:])
         bdcf.append(dcf[idx,:])
         binSelect[idx,b] = resp[idx]
-    
+
     bksp = np.stack(bksp, axis=0)
     bcoord = np.stack(bcoord, axis=0)
     bdcf = np.stack(bdcf, axis=0)
@@ -246,40 +277,68 @@ if __name__=='__main__':
     parser = argparse.ArgumentParser(
          description='Converts UWUTE h5 files to npy arrays in natural time ordering.')
     
-    parser.add_argument('fname', type=str)
-    parser.add_argument('--folder', type=str, default = os.getcwd())
+    parser.add_argument('h5_file', type=str)
+    parser.add_argument('folder', type=str)
     parser.add_argument('--tr', type=float, default = 0.0037, help='TR in seconds.')
     parser.add_argument('--bins', type=int, default = 6, help='number of bins')
-    parser.add_argument('--resp_polar', type=float, default = -1, help='Polarization of respiratory motion +1 or -1')
+    parser.add_argument('--resp_polar', type=float, default = 1, help='Polarization of respiratory motion +1 or -1')
     args = parser.parse_args()
     
-    
-    fname = args.fname
-    h5_file = fname + '.h5'
+    tStart = time.time()
+
     folder = args.folder
+    #h5_file = os.path.join(folder, 'MRI_Raw.h5')
+    h5_file = os.path.join(args.h5_file, 'MRI_Raw.h5')
     tr = args.tr
     bins = args.bins
     resp_polar = args.resp_polar
-
     logging.basicConfig(level=logging.INFO)
-
-    # convert h5
-    logging.info('Converting H5.')
-
+    
     # convert h5 
     with h5py.File(h5_file, 'r') as hf:
-        ksp, coord, dcf = convert_uwute(hf)
+        ksp, coord, dcf, resp_b = convert_uwute(hf)
+        
+    logging.info('Saving data.')
+    os.makedirs(folder, exist_ok=True)
+    # np.save(os.path.join(folder, 'ksp.npy'), ksp)
+    # np.save(os.path.join(folder, 'coord.npy'), coord)
+    # np.save(os.path.join(folder, 'dcf.npy'), dcf)
     
     # respiratory signal
     logging.info('Extracting respiratory signal.')
     dc = ksp[:, :, 0]
+
+    # NJS: check resp polarity
+    resp_b = resp_b - np.mean((np.amax(resp_b) + np.amin(resp_b))/2)
+    resp_b = resp_b/np.amax(resp_b)
     resp = resp_polar * estimate_resp(dc, tr)
-    np.save(os.path.join(folder, 'resp.npy'), resp)
-    
-    # binning
+    resp_inv = -1 * resp
+    sse_ = sum((resp_b - resp)**2)
+    sse_inv = sum((resp_b - resp_inv)**2)
+    if sse_inv < sse_:
+        resp_polar = -1*resp_polar
+        logging.info(f'resp_polarity = {resp_polar}')
+    else:
+        resp_polar = 1*resp_polar
+        logging.info(f'resp_polarity = {resp_polar}')
+    # np.save(os.path.join(folder, 'resp.npy'), resp)
+    # run again in case resp_polar has changed 
+    resp = resp_polar * estimate_resp(dc, tr)
+
+    nSpokes = resp.shape[0]
+    fig1, ax1 = plt.subplots()
+    ax1.plot(np.arange(1,nSpokes+1),resp_b,linewidth=0.25,label='resp-bellows')
+    ax1.plot(np.arange(1,nSpokes+1),resp,linewidth=0.25,label='resp-DC')
+    ax1.set_xlabel('# points')
+    ax1.set_ylabel('Resp Signal')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(('respPolarity'),dpi=600)
+
+    # # binning
     logging.info('Motion resolved binning.')
     bksp, bcoord, bdcf, binAssigned = pr_binning(ksp, coord, dcf, resp, tr, bins)
-    
+
     np.save(os.path.join(folder, 'binAssigned.npy'), binAssigned)
     nSpokes, nbins = binAssigned.shape
 
@@ -294,11 +353,10 @@ if __name__=='__main__':
     plt.tight_layout()
     plt.savefig(('binAssigned'),dpi=600)
 
-    logging.info('Saving data.')
-    os.makedirs(folder, exist_ok=True)
-    # np.save(os.path.join(folder, 'ksp.npy'), ksp)
-    # np.save(os.path.join(folder, 'coord.npy'), coord)
-    # np.save(os.path.join(folder, 'dcf.npy'), dcf)
     np.save(os.path.join(folder, 'bksp.npy'), bksp)
     np.save(os.path.join(folder, 'bcoord.npy'), bcoord)
     np.save(os.path.join(folder, 'bdcf.npy'), bdcf)
+
+    tEnd = time.time()
+    logging.info(f'{sys.argv[0]} took {(tEnd - tStart)/60:.2f} min to run.')
+
